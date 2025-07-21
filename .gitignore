@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+
+# Dependency directories
+/bson/
+/dns/
+/gridfs/
+/pymongo/
+*.dist-info/
+
+# Virtual environments
+.venv/
+.env/
+
+# vscode
+.vscode/
+
+# zip
+*.zip
