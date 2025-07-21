@@ -1,4 +1,4 @@
-# Applicant to Student Conversion Worker Lambda
+# Create Student Credentials Worker Lambda
 
 ## Setup
 ### 1. Clone the repository:
