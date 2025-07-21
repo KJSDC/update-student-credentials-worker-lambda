@@ -1,7 +1,10 @@
 import pymongo
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
+import bcrypt
+from bson import ObjectId
+
 
 from pymongo import UpdateOne
 
@@ -90,6 +93,23 @@ def map_excel_row_to_db_fields(row: dict) -> dict:
             mapped[db_field] = value
     return mapped
 
+def hash_bcrypt(input_str: str) -> str:
+    salt = bcrypt.gensalt(rounds=10)
+    hashed = bcrypt.hashpw(input_str.encode("utf-8"), salt)
+    return hashed.decode("utf-8")
+
+def get_student_auth_role_object_id():
+    """
+    Fetch the ObjectId for the STUDENT role from the auth roles collection.
+    """
+    auth_roles_collection = DATABASE.get_collection(AUTH_ROLES_COLLECTION)
+    doc = auth_roles_collection.find_one({"authRoleName_AuthCommon_Text": "STUDENT"}, {"_id": 1})
+    if doc and "_id" in doc:
+        return doc["_id"]
+    else:
+        logger.error("STUDENT auth role not found in auth roles collection.")
+        return None
+
 def lambda_handler(event, context):
     """
     Receives a batch of rows (list of dicts), each with Excel headers.
@@ -102,6 +122,9 @@ def lambda_handler(event, context):
     try:
         initialize_mongo_client()
         student_profile_collection = DATABASE.get_collection(ERP_STUDENT_PROFILE_COLLECTION)
+        auth_users_collection = DATABASE.get_collection(AUTH_USERS_COLLECTION)
+        student_role_id = get_student_auth_role_object_id()
+
 
         batch = event.get("batch", [])
         if not batch or not isinstance(batch, list):
@@ -112,25 +135,50 @@ def lambda_handler(event, context):
             }
 
         operations = []
+        credentials_operations = []
         app_numbers_in_batch = []
 
         for row in batch:
             mapped_fields = map_excel_row_to_db_fields(row)
             app_no = mapped_fields.get("applicationNumber_ErpStudentProfile_Text")
+            college_email = mapped_fields.get("studentCollegeEmail_ErpStudentProfile_Text")
+
             if not app_no:
                 failed_application_numbers.append(row.get("Application Number", ""))
                 continue
+
             app_numbers_in_batch.append(app_no)
             update_fields = {k: v for k, v in mapped_fields.items() if k != "applicationNumber_ErpStudentProfile_Text"}
-            if not update_fields:
-                continue  # nothing to update
-            operations.append(
-                UpdateOne(
-                    {"applicationNumber_ErpStudentProfile_Text": app_no},
-                    {"$set": update_fields}
+            if update_fields:
+                operations.append(
+                    UpdateOne(
+                        {"applicationNumber_ErpStudentProfile_Text": app_no},
+                        {"$set": update_fields}
+                    )
                 )
-            )
-
+            
+            # Add credentials for user
+            if college_email:
+                now_millis = int(datetime.now(timezone.utc).timestamp() * 1000)
+                hashed_password = hash_bcrypt(college_email)
+                credentials_doc = {
+                    "userEmail_AuthCommon_Text": college_email,
+                    "userPassword_AuthCommon_Text": hashed_password,
+                    "isActive_KJUSYSCommon_Bool": True,
+                    "createdOn_KJUSYSCommon_DateTime": now_millis,
+                    "authRoles_AuthCommon_ObjectIdArray": [
+                        ObjectId(student_role_id)
+                    ] if student_role_id else []
+                }
+                # Either upsert (update if exists, insert if not)
+                credentials_operations.append(
+                    UpdateOne(
+                        {"userEmail_AuthCommon_Text": college_email},
+                        {"$set": credentials_doc},
+                        upsert=True
+                    )
+                )
+        # Execute student updates
         if operations:
             result = student_profile_collection.bulk_write(operations, ordered=False)
             modified_count = result.modified_count
@@ -149,6 +197,12 @@ def lambda_handler(event, context):
 
         else:
             logger.info("No updates to perform (no mappable fields found in batch)")
+        
+        # Execute credentials upserts
+        if credentials_operations:
+            credentials_result = auth_users_collection.bulk_write(credentials_operations, ordered=False)
+            logger.info(f"Credentials upserted: {credentials_result.upserted_count}, modified: {credentials_result.modified_count}")
+
 
         success = len(failed_application_numbers) == 0
         return {
