@@ -1,5 +1,7 @@
 import pymongo
 import logging
+import re
+from datetime import datetime
 
 from pymongo import UpdateOne
 
@@ -38,24 +40,54 @@ def initialize_mongo_client() -> None:
 def map_excel_row_to_db_fields(row: dict) -> dict:
     """
     Convert a row from Excel headers to collection field names.
-    Handles the 'Status' field (active/inactive) to boolean.
+    Handles:
+    - Status: string 'active'/'inactive' to boolean.
+    - *_Text: to uppercase.
+    - *_Date: formats 'dd-mm-yyyy' or 'dd/mm/yyyy' to millis.
     Ignores unmapped fields.
     """
     mapped = {}
     for excel_col, value in row.items():
         db_field = EXCEL_TO_DB_FIELD_MAP.get(excel_col)
-        if db_field:
-            # Special handling for Status
-            if db_field == "isActive_KJUSYSCommon_Bool":
-                if isinstance(value, str) and value.strip().lower() == "active":
-                    mapped[db_field] = True
-                elif isinstance(value, str) and value.strip().lower() == "inactive":
-                    mapped[db_field] = False
-                else:
-                    # Optionally skip or set a default if status is not recognized
-                    mapped[db_field] = False
+        if not db_field:
+            continue
+
+        # Status field conversion
+        if db_field == "isActive_KJUSYSCommon_Bool":
+            if isinstance(value, str) and value.strip().lower() == "active":
+                mapped[db_field] = True
+            elif isinstance(value, str) and value.strip().lower() == "inactive":
+                mapped[db_field] = False
             else:
-                mapped[db_field] = value
+                mapped[db_field] = False  # or skip
+
+        # _Text fields to uppercase
+        elif db_field.endswith("_Text"):
+            if isinstance(value, str):
+                mapped[db_field] = value.upper()
+            elif value is not None:
+                mapped[db_field] = str(value).upper()
+            else:
+                mapped[db_field] = ""
+
+        # _Date fields to millis
+        elif db_field.endswith("_Date"):
+            millis = None
+            if isinstance(value, str):
+                # Acceptable formats: dd-mm-yyyy or dd/mm/yyyy
+                match = re.match(r"(\d{2})[-/](\d{2})[-/](\d{4})", value.strip())
+                if match:
+                    day, month, year = match.groups()
+                    try:
+                        dt = datetime(int(year), int(month), int(day))
+                        millis = int(dt.timestamp() * 1000)
+                    except Exception:
+                        millis = None
+            mapped[db_field] = millis
+
+        # Default: keep as-is
+        else:
+            mapped[db_field] = value
     return mapped
 
 def lambda_handler(event, context):
