@@ -1,4 +1,4 @@
-# Update Student Credentials Worker Lambda
+# Student Credentials Update Worker Lambda
 
 ## Setup
 ### 1. Clone the repository:
