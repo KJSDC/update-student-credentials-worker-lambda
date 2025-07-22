@@ -4,10 +4,7 @@ import re
 from datetime import datetime, timezone
 import bcrypt
 from bson import ObjectId
-
-
 from pymongo import UpdateOne
-
 from constants import *
 
 logger = logging.getLogger()
@@ -62,7 +59,7 @@ def map_excel_row_to_db_fields(row: dict) -> dict:
             elif isinstance(value, str) and value.strip().lower() == "inactive":
                 mapped[db_field] = False
             else:
-                mapped[db_field] = False  # or skip
+                mapped[db_field] = False
 
         # _Text fields to uppercase
         elif db_field.endswith("_Text"):
@@ -82,7 +79,7 @@ def map_excel_row_to_db_fields(row: dict) -> dict:
                 if match:
                     day, month, year = match.groups()
                     try:
-                        dt = datetime(int(year), int(month), int(day))
+                        dt = datetime(int(year), int(month), int(day), tzinfo=timezone.utc)
                         millis = int(dt.timestamp() * 1000)
                     except Exception:
                         millis = None
@@ -94,6 +91,8 @@ def map_excel_row_to_db_fields(row: dict) -> dict:
     return mapped
 
 def hash_bcrypt(input_str: str) -> str:
+    if not input_str:
+        raise ValueError("Input string for hashing cannot be empty")
     salt = bcrypt.gensalt(rounds=10)
     hashed = bcrypt.hashpw(input_str.encode("utf-8"), salt)
     return hashed.decode("utf-8")
@@ -118,6 +117,7 @@ def lambda_handler(event, context):
     logger.info("Worker lambda: starting batch update")
 
     failed_application_numbers = []
+    batch = event.get("batch", []) if isinstance(event, dict) else []
 
     try:
         initialize_mongo_client()
@@ -125,8 +125,6 @@ def lambda_handler(event, context):
         auth_users_collection = DATABASE.get_collection(AUTH_USERS_COLLECTION)
         student_role_id = get_student_auth_role_object_id()
 
-
-        batch = event.get("batch", [])
         if not batch or not isinstance(batch, list):
             return {
                 "success": False,
@@ -160,17 +158,21 @@ def lambda_handler(event, context):
             # Add credentials for user
             if college_email:
                 now_millis = int(datetime.now(timezone.utc).timestamp() * 1000)
-                hashed_password = hash_bcrypt(college_email)
+                try:
+                    hashed_password = hash_bcrypt(college_email)
+                except Exception as e:
+                    logger.error(f"Failed to hash password for email {college_email}: {e}")
+                    failed_application_numbers.append(app_no)
+                    continue
                 credentials_doc = {
                     "userEmail_AuthCommon_Text": college_email,
                     "userPassword_AuthCommon_Text": hashed_password,
                     "isActive_KJUSYSCommon_Bool": True,
                     "createdOn_KJUSYSCommon_DateTime": now_millis,
                     "authRoles_AuthCommon_ObjectIdArray": [
-                        ObjectId(student_role_id)
+                        student_role_id if isinstance(student_role_id, ObjectId) else ObjectId(student_role_id)
                     ] if student_role_id else []
                 }
-                # Either upsert (update if exists, insert if not)
                 credentials_operations.append(
                     UpdateOne(
                         {"userEmail_AuthCommon_Text": college_email},
@@ -185,9 +187,6 @@ def lambda_handler(event, context):
             logger.info(f"Updated {modified_count} record(s)")
             
             # Find which app numbers were not modified (possibly not present in DB)
-            updated_app_numbers = set()
-            # There is no direct way to get which documents were not found in bulk_write,
-            # so fetch which application numbers are present after update.
             present_docs = student_profile_collection.find(
                 {"applicationNumber_ErpStudentProfile_Text": {"$in": app_numbers_in_batch}},
                 {"applicationNumber_ErpStudentProfile_Text": 1, "_id": 0}
@@ -203,7 +202,6 @@ def lambda_handler(event, context):
             credentials_result = auth_users_collection.bulk_write(credentials_operations, ordered=False)
             logger.info(f"Credentials upserted: {credentials_result.upserted_count}, modified: {credentials_result.modified_count}")
 
-
         success = len(failed_application_numbers) == 0
         return {
             "success": success,
@@ -213,8 +211,12 @@ def lambda_handler(event, context):
 
     except Exception as e:
         logger.exception("Unexpected exception in worker lambda")
+        # batch is always defined above
         return {
             "success": False,
             "message": f"Unhandled exception: {str(e)}",
-            "failedRows": failed_application_numbers + [row.get("Application Number", "") for row in batch]
+            "failedRows": failed_application_numbers + [
+                row.get("Application Number", "") for row in batch
+                if row.get("Application Number", "") not in failed_application_numbers
+            ]
         }
