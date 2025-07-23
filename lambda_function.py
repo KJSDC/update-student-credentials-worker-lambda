@@ -164,10 +164,12 @@ def lambda_handler(event, context):
                     logger.error(f"Failed to hash password for email {college_email}: {e}")
                     failed_application_numbers.append(app_no)
                     continue
+                # Use the same status as in student profile
+                is_active_status = mapped_fields.get("isActive_KJUSYSCommon_Bool", True)
                 credentials_doc = {
                     "userEmail_AuthCommon_Text": college_email,
                     "userPassword_AuthCommon_Text": hashed_password,
-                    "isActive_KJUSYSCommon_Bool": True,
+                    "isActive_KJUSYSCommon_Bool": is_active_status,
                     "createdOn_KJUSYSCommon_DateTime": now_millis,
                     "authRoles_AuthCommon_ObjectIdArray": [
                         student_role_id if isinstance(student_role_id, ObjectId) else ObjectId(student_role_id)
