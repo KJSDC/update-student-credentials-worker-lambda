@@ -85,6 +85,13 @@ def map_excel_row_to_db_fields(row: dict) -> dict:
                         millis = None
             mapped[db_field] = millis
 
+        # _Int fields to int
+        elif db_field.endswith("_Int"):
+            try:
+                mapped[db_field] = int(value)
+            except:
+                mapped[db_field] = None
+
         # Default: keep as-is
         else:
             mapped[db_field] = value
